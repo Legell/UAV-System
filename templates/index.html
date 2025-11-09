@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <title>Монитор БВС - ArduPilot</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    crossorigin=""
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    crossorigin=""
+  ></script>
+  <style>
+    @keyframes pulseGreen {
+      0% { box-shadow: 0 0 0 0 rgba(34,197,94, 0.5); }
+      70% { box-shadow: 0 0 0 14px rgba(34,197,94, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(34,197,94, 0); }
+    }
+    .refresh-btn {
+      background: #3b82f6;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+    .refresh-btn:hover {
+      background: #2563eb;
+    }
+    .uav-info {
+      font-size: 12px;
+      color: #666;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="sidebar">
+    <div class="sidebar-header">
+      БВС / UAVs - ArduPilot
+      <button class="refresh-btn" onclick="refreshUAVs()">Обновить</button>
+    </div>
+
+    <div id="uavList" class="uav-list">
+      {% for uav in uavs %}
+      <div class="uav-item" data-uav-id="{{ uav.id }}" data-lat="{{ uav.lat }}" data-lon="{{ uav.lon }}">
+        <div class="uav-item-top">
+          <span>{{ uav.name }}</span>
+          <span class="status {{ 'online' if uav.status == 'online' else 'offline' }}">
+            {{ uav.status }}
+          </span>
+        </div>
+        <div class="small">
+          {{ '%.5f'|format(uav.lat) }}, {{ '%.5f'|format(uav.lon) }}
+        </div>
+        <div class="uav-info">
+          Высота: {{ '%.1f'|format(uav.alt) }}m | Курс: {{ uav.heading }}° | Скорость: {{ '%.1f'|format(uav.ground_speed) }} m/s
+        </div>
+      </div>
+      {% else %}
+      <div class="no-uavs">Нет подключенных БВС. Запустите симулятор на портах 200-210.</div>
+      {% endfor %}
+    </div>
+
+    <div class="section">
+      <div class="section-title">Погода</div>
+      <div id="weatherBox" class="weather-box small">Выберите БВС</div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Миссия</div>
+      <div id="missionBox" class="small">
+        {% if first_mission %}
+          {% for item in first_mission %}
+            <div class="mission-item">
+              <b>#{{ item.seq }}</b> {{ item.command }}
+              <div class="small">{{ item.params }}</div>
+            </div>
+          {% endfor %}
+        {% else %}
+          Миссия пустая
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Загрузить миссию (JSON)</div>
+      <input type="file" id="missionFile" accept="application/json">
+      <button id="uploadBtn">Загрузить</button>
+      <div id="uploadStatus" class="small"></div>
+    </div>
+  </div>
+
+<script>
+    const UAVS = {{ uavs|tojson }};
+
+    let map = L.map('map').setView([18.768, 98.967], 12);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19
+    }).addTo(map);
+
+    const markers = {};
+    let currentUavId = UAVS.length ? UAVS[0].id : null;
+
+    function makeIcon(uav) {
+      const offline = uav.status !== 'online';
+      const borderColor = offline ? '#dc2626' : '#22c55e';
+      const animation = offline ? 'none' : 'pulseGreen 2s infinite';
+      
+      const uavNumber = uav.port - 219;
+      const colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+      const bgColor = colors[(uavNumber - 1) % colors.length];
+      
+      return L.divIcon({
+        className: 'uav-marker',
+        html: `<div style="
+          width:48px;
+          height:48px;
+          border:3px solid ${borderColor};
+          border-radius:50%;
+          background:${bgColor};
+          color:white;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          font-size:16px;
+          font-weight:bold;
+          animation:${animation};
+          transform:rotate(${uav.heading || 0}deg);
+        ">${uavNumber}</div>`,
+        iconSize: [48, 48],
+        iconAnchor: [24, 24]
+      });
+    }
+
+    function updateUAVsList(uavs) {
+        const uavListElement = document.getElementById('uavList');
+        uavListElement.innerHTML = '';
+
+        if (uavs.length === 0) {
+            uavListElement.innerHTML = '<div class="no-uavs">Нет подключенных БВС. Запустите симулятор на портах 220-225.</div>';
+            return;
+        }
+
+        uavs.forEach(uav => {
+            const uavItem = document.createElement('div');
+            uavItem.className = 'uav-item';
+            uavItem.dataset.uavId = uav.id;
+            uavItem.dataset.lat = uav.lat;
+            uavItem.dataset.lon = uav.lon;
+
+            uavItem.innerHTML = `
+                <div class="uav-item-top">
+                    <span>${uav.name}</span>
+                    <span class="status ${uav.status === 'online' ? 'online' : 'offline'}">
+                        ${uav.status}
+                    </span>
+                </div>
+                <div class="small">
+                    ${uav.lat.toFixed(5)}, ${uav.lon.toFixed(5)}
+                </div>
+                <div class="uav-info">
+                    Высота: ${uav.alt.toFixed(1)}m | Курс: ${uav.heading}° | Скорость: ${uav.ground_speed.toFixed(1)} m/s
+                </div>
+            `;
+
+            uavItem.addEventListener('click', () => handleUavClick(uav));
+            uavListElement.appendChild(uavItem);
+        });
+    }
+
+    async function handleUavClick(uav) {
+        currentUavId = uav.id;
+
+        map.setView([uav.lat, uav.lon], 16);
+
+        document.querySelectorAll('.uav-item').forEach(item => {
+            item.style.background = item.dataset.uavId === uav.id ? '#f0f8ff' : '';
+        });
+
+        await loadMission(uav.id);
+        
+        await loadWeather(uav.lat, uav.lon);
+    }
+
+    async function loadMission(uavId) {
+        try {
+            const res = await fetch(`/uavs/${uavId}/mission`);
+            const data = await res.json();
+            const box = document.getElementById('missionBox');
+            box.innerHTML = '';
+            
+            if (!data.items || data.items.length === 0) {
+                box.innerHTML = 'Миссия пустая';
+            } else {
+                data.items.forEach(item => {
+                    const div = document.createElement('div');
+                    div.className = 'mission-item';
+                    div.innerHTML = `<b>#${item.seq}</b> ${item.command} <div class="small">${JSON.stringify(item.params)}</div>`;
+                    box.appendChild(div);
+                });
+            }
+        } catch (error) {
+            console.error('Ошибка загрузки миссии:', error);
+        }
+    }
+
+    async function loadWeather(lat, lon) {
+        try {
+            const wres = await fetch(`/weather?lat=${lat}&lon=${lon}`);
+            const wdata = await wres.json();
+            const wbox = document.getElementById('weatherBox');
+            
+            if (wdata.error) {
+                wbox.innerHTML = `<div style="color: red;">Ошибка: ${wdata.error}</div>`;
+            } else {
+                wbox.innerHTML = `
+                    <div><b>${wdata.name}</b></div>
+                    <div>Темп: ${wdata.temp} °C</div>
+                    <div>Описание: ${wdata.description}</div>
+                    <div>Ветер: ${wdata.wind_speed} м/с</div>
+                `;
+            }
+        } catch (error) {
+            console.error('Ошибка загрузки погоды:', error);
+            document.getElementById('weatherBox').innerHTML = '<div style="color: red;">Ошибка загрузки погоды</div>';
+        }
+    }
+
+    function initializeMarkers(uavs) {
+        uavs.forEach(uav => {
+            const marker = L.marker([uav.lat, uav.lon], {icon: makeIcon(uav)}).addTo(map);
+            marker.bindPopup(`
+                <b>${uav.name}</b><br>
+                Статус: ${uav.status}<br>
+                Порт: ${uav.port}<br>
+                Координаты: ${uav.lat.toFixed(5)}, ${uav.lon.toFixed(5)}<br>
+                Высота: ${uav.alt.toFixed(1)}m<br>
+                Курс: ${uav.heading}°<br>
+                Скорость: ${uav.ground_speed.toFixed(1)} m/s
+            `);
+            markers[uav.id] = marker;
+        });
+    }
+
+    async function updateUAVsData() {
+        try {
+            const response = await fetch('/uavs');
+            const uavs = await response.json();
+            
+            updateUAVsList(uavs);
+            
+            uavs.forEach(uav => {
+                if (markers[uav.id]) {
+                    markers[uav.id].setLatLng([uav.lat, uav.lon]);
+                    
+                    markers[uav.id].setIcon(makeIcon(uav));
+                    
+                    markers[uav.id].setPopupContent(`
+                        <b>${uav.name}</b><br>
+                        Статус: ${uav.status}<br>
+                        Порт: ${uav.port}<br>
+                        Координаты: ${uav.lat.toFixed(5)}, ${uav.lon.toFixed(5)}<br>
+                        Высота: ${uav.alt.toFixed(1)}m<br>
+                        Курс: ${uav.heading}°<br>
+                        Скорость: ${uav.ground_speed.toFixed(1)} m/s
+                    `);
+                } else {
+                    const marker = L.marker([uav.lat, uav.lon], {icon: makeIcon(uav)}).addTo(map);
+                    marker.bindPopup(`
+                        <b>${uav.name}</b><br>
+                        Статус: ${uav.status}<br>
+                        Порт: ${uav.port}<br>
+                        Координаты: ${uav.lat.toFixed(5)}, ${uav.lon.toFixed(5)}<br>
+                        Высота: ${uav.alt.toFixed(1)}m<br>
+                        Курс: ${uav.heading}°<br>
+                        Скорость: ${uav.ground_speed.toFixed(1)} m/s
+                    `);
+                    markers[uav.id] = marker;
+                }
+            });
+
+            const currentUavIds = uavs.map(u => u.id);
+            for (const uavId in markers) {
+                if (!currentUavIds.includes(uavId)) {
+                    map.removeLayer(markers[uavId]);
+                    delete markers[uavId];
+                }
+            }
+
+            if (currentUavId && uavs.find(u => u.id === currentUavId)) {
+                const currentUav = uavs.find(u => u.id === currentUavId);
+                await loadWeather(currentUav.lat, currentUav.lon);
+            }
+
+        } catch (error) {
+            console.error('Ошибка обновления данных:', error);
+        }
+    }
+
+    function initialize() {
+        initializeMarkers(UAVS);
+        updateUAVsList(UAVS);
+        
+        if (UAVS.length > 0) {
+            handleUavClick(UAVS[0]);
+        }
+        
+        setInterval(updateUAVsData, 2000);
+    }
+
+    document.getElementById('uploadBtn').addEventListener('click', () => {
+        if (!currentUavId) {
+            document.getElementById('uploadStatus').innerText = 'Сначала выберите БВС';
+            return;
+        }
+        document.getElementById('uploadStatus').innerText = 'не реализовано';
+    });
+
+    async function refreshUAVs() {
+        try {
+            const response = await fetch('/refresh_uavs');
+            const result = await response.json();
+            await updateUAVsData();
+        } catch (error) {
+            console.error('Ошибка обновления:', error);
+        }
+    }
+
+    async function disconnectUAV(uavId) {
+        try {
+            const response = await fetch(`/uavs/${uavId}/disconnect`, {method: 'POST'});
+            const result = await response.json();
+            console.log('БВС отключен:', result);
+            await updateUAVsData();
+        } catch (error) {
+            console.error('Ошибка отключения:', error);
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', initialize);
+</script>
+</body>
+</html>
