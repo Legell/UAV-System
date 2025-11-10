@@ -339,7 +339,7 @@ tailscale ip -4
 ```
 
 > Этот IP — внутренний адрес Raspberry Pi в VPN-сети.
-> Сервер Headscale обычно получает IP `100.64.0.2` (или следующий по списку).
+> Клиент Headscale обычно получает IP `100.64.0.1` (или следующий по списку).
 
 ---
 
@@ -358,7 +358,7 @@ ID | Hostname | User | IP addresses          | Connected
 1  | repka-pi | mynet | 100.64.0.1, fd7a::1 | online
 ```
 
-С Raspberry Pi можно проверить пинг до сервера:
+С Repka Pi можно проверить пинг до сервера:
 
 ```bash
 ping 100.64.0.2
