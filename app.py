@@ -80,7 +80,7 @@ def listen_to_uav(uav_id):
                             UAVS[uav_id]["lon"] = msg.lon / 1e7
                             UAVS[uav_id]["alt"] = msg.relative_alt / 1000.0
                             UAVS[uav_id]["heading"] = msg.hdg / 100
-                
+                 
                 elif msg.get_type() == 'VFR_HUD':
                     with uavs_lock:
                         if uav_id in UAVS:
