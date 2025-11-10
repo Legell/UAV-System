@@ -74,6 +74,11 @@ wget https://github.com/juanfont/headscale/releases/latest/download/headscale_am
 sudo dpkg -i headscale_amd64.deb
 ```
 ### 3️⃣ Конфигурация `/etc/headscale/config.yaml` для HeadScale
+
+```bash
+nano /etc/headscale/config.yaml
+```
+Открывается контекстное меню, в которое вставляем конфигурационные параметры:
 > 💡 В строке **server_url** значение **<HEADSCALE_SERVER_IP>** заменить на публичный IP вашей VPS/VDS (например, `109.123.165.213`)
 
 ```yaml
@@ -109,9 +114,10 @@ dns:
 tls_cert_path: /etc/ssl/headscale/server.crt
 tls_key_path: /etc/ssl/headscale/server.key
 ```
-
+---
 ### 4️⃣ Сертификаты ssl для подключения по https
 
+> 💡 Значение **<HEADSCALE_SERVER_IP>** заменить на публичный IP вашей VPS/VDS (например, `109.123.165.213`)
 ```bash
 sudo mkdir -p /etc/ssl/headscale
 sudo openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
@@ -120,5 +126,412 @@ sudo openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
   -subj "/CN=<HEADSCALE_SERVER_IP>"
 sudo chown headscale:headscale /etc/ssl/headscale/server.*
 ```
+Проверить, что всё создано:
+
+```bash
+ls -l /etc/ssl/headscale/
+# -rw------- 1 headscale headscale 3272 server.key
+# -rw-r--r-- 1 headscale headscale 1822 server.crt
+```
+---
+### 5️⃣ Запуск и создание пользовател
+
+Активируем и запускаем сервис:
+
+```bash
+sudo systemctl enable headscale
+sudo systemctl start headscale
+```
+
+Проверяем статус:
+
+```bash
+sudo systemctl status headscale
+```
+
+Если всё корректно — должен быть вывод:
+
+```
+Active: active (running)
+Listening on 0.0.0.0:443
+Database: /var/lib/headscale/db.sqlite
+```
+### 6️⃣ Создание пользователя
+
+Headscale требует, чтобы все узлы были привязаны к пользователю.
+Создадим пользователя:
+
+```bash
+sudo headscale users create mynet
+```
+
+Посмотреть список пользователей и их **ID**:
+
+```bash
+sudo headscale users list
+```
+
+Пример вывода:
+
+```
+ID | Name   | Created
+1  | mynet  | 2025-11-08 15:00:00
+```
+
+---
+### 7️⃣ Создание ключа для подключения клиента
+
+> ⚠️ При создании ключей используется **ID**, а не имя (`--user 1`, не `--user mynet`).
+Генерируем ключ для авторизации клиента:
+
+```bash
+sudo headscale preauthkeys create --user 1 --reusable --expiration 168h
+```
+
+Пример вывода:
+
+```
+{
+  "id": 1,
+  "key": "tskey-auth-k7dPjY7xV9cF5xYxxxxxxx",
+  "user_id": 1,
+  "reusable": true,
+  "expiration": "2025-11-15T15:00:00Z"
+}
+```
+
+Скопируй ключ `tskey-auth-...` — он понадобится на Raspberry Pi.
+
+---
+
+### 8️⃣ Проверка работы Headscale
+
+Посмотреть все узлы:
+
+```bash
+sudo headscale nodes list
+```
+
+Вывод до подключения клиентов:
+
+```
+ID | Hostname | Name | User | IP addresses | Connected | Expired
+-- | -------- | ---- | ---- | ------------- | ---------- | -------
+```
+
+После подключения Repka Pi появится строка вроде:
+
+```
+1 | repka-pi | repka-pi | 1 | 100.64.0.1 | online | no
+```
+
+---
+
+### 9️⃣ Полезные команды Headscale, которые могут понадобиться при работе с ним
+
+| Действие             | Команда                              |
+| -------------------- | ------------------------------------ |
+| Список пользователей | `sudo headscale users list`          |
+| Список узлов         | `sudo headscale nodes list`          |
+| Удалить узел         | `sudo headscale nodes delete <id>`   |
+| Список ключей        | `sudo headscale preauthkeys list`    |
+| Перезапустить сервис | `sudo systemctl restart headscale`   |
+| Проверить логи       | `sudo journalctl -u headscale -f` |
+
+---
+## 🧠 Установка и настройка клиента (Repka Pi, либо любой другой linux компьютер) 
+
+> 💡 Клиент будет подключаться к Headscale и ретранслировать телеметрию через VPN-канал.  
+> Абсолютно таким-же образом происходит установка и настройка TailScale на Linux-компьютер для запуска и подключения БВС к QGroundControl
+
+---
+### 1️⃣ Подготовка системы
+
+```bash
+sudo apt update
+sudo apt install -y curl python3-venv python3-pip
+````
+---
+
+### 2️⃣ Установка Tailscale
+
+Скачаем и установим официальный клиент:
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+```
+
+Проверим:
+
+```bash
+tailscale version
+# Пример: 1.68.1 (tailscaled), linux/arm64; go1.23
+```
+
+---
+### 3️⃣ Подключение к Headscale
+
+> 💡 Используем **ключ аутентификации** (`tskey-auth-...`), полученный на сервере.
+Команда подключения:
+
+```bash
+sudo tailscale up \
+  --login-server https://<HEADSCALE_SERVER_IP> \
+  --authkey tskey-auth-XXXXXXXXXXXX \
+  --accept-dns=false
+```
+> ⚠️ Если сертификат самоподписанный — клиент может выдать ошибку `x509: certificate signed by unknown authority`.
+> В этом случае нужно добавить сертификат вручную (4 пункт).
+
+---
+### 4️⃣ Установка сертификата Headscale на Raspberry Pi
+
+Скопируй файл `server.crt` с сервера на Pi (через `scp` или `tailscp`):
+
+```bash
+scp root@<HEADSCALE_SERVER_IP>:/etc/ssl/headscale/server.crt /root/headscale.crt
+```
+
+Добавь его в хранилище доверенных сертификатов:
+
+```bash
+sudo cp /root/headscale.crt /usr/local/share/ca-certificates/headscale.crt
+sudo update-ca-certificates
+sudo systemctl restart tailscaled
+```
+
+Теперь снова подключаемся:
+
+```bash
+sudo tailscale up \
+  --login-server https://<HEADSCALE_SERVER_IP> \
+  --authkey tskey-auth-XXXXXXXXXXXX \
+  --accept-dns=false
+```
+
+---
+### 5️⃣ Проверка VPN-соединения
+
+После подключения:
+
+```bash
+tailscale status
+tailscale ip -4
+```
+
+Пример вывода:
+
+```
+100.64.0.1
+```
+
+> Этот IP — внутренний адрес Raspberry Pi в VPN-сети.
+> Сервер Headscale обычно получает IP `100.64.0.2` (или следующий по списку).
+
+---
+
+### 6️⃣ Проверка связи между узлами
+
+На **сервере Headscale**:
+
+```bash
+sudo headscale nodes list
+```
+
+Ожидаемый вывод:
+
+```
+ID | Hostname | User | IP addresses          | Connected
+1  | repka-pi | mynet | 100.64.0.1, fd7a::1 | online
+```
+
+С Raspberry Pi можно проверить пинг до сервера:
+
+```bash
+ping 100.64.0.2
+```
+## ✈️ Установка и настройка MAVProxy на Repka pi
+
+MAVProxy — это маршрутизатор телеметрии MAVLink.
+Он читает данные от автопилота (через USB/UART) и пересылает их по UDP/TCP.
+
+---
+### 1️⃣ Создание виртуальной среды
+
+```bash
+python3 -m venv /root/mig
+source /root/mig/bin/activate
+pip install MAVProxy
+deactivate
+```
+
+Проверим:
+
+```bash
+/root/mig/bin/mavproxy.py --version
+# Пример: MAVProxy 1.8.70
+```
+
+---
+### 2️⃣ Подключение полетного контроллера
+
+Определим порт контроллера (например, `/dev/ttyACM0`):
+
+```bash
+ls /dev/ttyACM*
+```
+
+Если устройство найдено, можно протестировать MAVProxy вручную:
+>💡 Значение **<VPN_IP>** заменить на IP компьютера/ноутбука/VPS подключенного к VPN сети TailScale, на котором будем запускать **Flask Web UI**, либо **QGroundControl** (например `100.64.0.2`)
+
+```bash
+/root/mig/bin/python -m MAVProxy.mavproxy \
+  --master=/dev/ttyACM0,57600 \
+  --out=udp:<VPN_IP>:14550
+```
+---
+### 3️⃣ Автозапуск MAVProxy через systemd
+
+Создаём сервис:
+
+```bash
+sudo tee /etc/systemd/system/mavproxy.service > /dev/null <<'EOF'
+[Unit]
+Description=MAVProxy (venv /root/mik, USB /dev/ttyACM0)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/lib/mavproxy
+
+ExecStart=/root/mik/bin/python /root/mik/bin/mavproxy.py \
+  --daemon \
+  --master=/dev/ttyACM0 --baud=57600 \
+  --out=udpin:<VPN_IP>:14550 \
+  --out=tcpin:<VPN_IP>:7652 \
+  --aircraft /var/lib/mavproxy/MyAC
+
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+Активируем и запускаем:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now mavproxy
+```
+
+---
+---
+
+### 4️⃣ Проверка статуса MAVProxy
+
+```bash
+sudo systemctl status mavproxy
+```
+
+Если работает — получим похожий вывод:
+
+```
+Active: **active (running)** since Sat 2025-11-08 15:00:00
+Process: 842 ExecStart=/root/mig/bin/python -m MAVProxy.mavproxy ...
+```
+
+---
+# 🚀 Варианты подключения к системе
+
+После установки и настройки Headscale + MAVProxy можно выбрать один из двух способов взаимодействия с БВС:
+| Вариант               | Интерфейс                              | Назначение                     |
+| --------------------- | -------------------------------------- | ------------------------------ |
+| 🛰 **QGroundControl** | GUI для операторов                     | Полный контроль и визуализация |
+| 🌐 **Flask Web UI**   | Web-панель для инженерного мониторинга | Отслеживание местоположения БВС, определение погоды в районе местоположения БВС    |
+
+---
+## 🛰 Вариант 1: Подключение через QGroundControl
+
+### 🔹 1. Установка QGroundControl
+
+#### На Ubuntu/Debian:
+```bash
+sudo apt install -y wget gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-tools
+wget https://d176tv9ibo4jno.cloudfront.net/latest/QGroundControl.AppImage -O QGroundControl.AppImage
+chmod +x QGroundControl.AppImage
+./QGroundControl.AppImage
+````
+
+#### На Windows:
+
+Скачать с [официального сайта](https://qgroundcontrol.com/downloads/).
+Запуск от имени администратора.
+
+---
+
+### 🔹 2. Настройка подключения
+
+1. Определи **VPN_IP_REPKA** Repka Pi (например `100.64.0.1`) и порт `14550`.
+
+2. На компьютере, где запущен QGroundControl, добавь соединение:
+
+   **Settings → Comm Links → Add → UDP Link**
+
+   * Name: `VPN_Link`
+   * Listening Port: `14550`
+   * Target Host: `<VPN_IP_REPKA>`
+
+3. Нажми **Connect**.
+   Через несколько секунд появится статус подключения:
+
+   ```
+   Connected to <VPN_IP_REPKA>:14550
+   ```
+
+---
+
+### 🔹 3. Проверка работы
+
+* В окне **HUD** отображаются углы, высота, скорость.
+* В **Widgets → Analyze View** можно видеть пакеты `ATTITUDE`, `GPS_RAW_INT`.
+* В консоли MAVProxy на Pi появятся логи передачи:
+
+  ```
+  Link 1 down: udp:100.64.0.2:14550
+  Link 2 up: udp:100.64.0.3:14550
+  ```
+
+💡 **Важно:**
+QGroundControl должен быть в одной Headscale-сети — т.е. тоже подключён через Tailscale к Headscale-серверу.
+
+---
+## 🌐 Вариант 2: Подключение через Flask Web UI (Python)
+
+Flask Web UI — это простой сервер, принимающий телеметрию по MAVLink и отображающий данные через веб-интерфейс.
+
+---
+
+### 🔹 1. Структура проекта
+
+```
+flask_app/
+├── app.py
+├── templates/
+│   └── index.html
+├── static/
+│   └── style.css
+└── requirements.txt
+```
+
+---
+
+### 🔹 2. Установка зависимостей
+Скачайте файлы репозитория
 
 
