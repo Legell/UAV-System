@@ -388,20 +388,18 @@ ls /dev/ttyACM*
 ```
 
 Если устройство найдено, можно протестировать MAVProxy вручную:
->💡 Значение **<VPN_IP>** заменить на IP компьютера/ноутбука/VPS подключенного к VPN сети TailScale, на котором будем запускать **Flask Web UI**, либо **QGroundControl** (например `100.64.0.2`)
 
 ```bash
 /root/mig/bin/python -m MAVProxy.mavproxy \
   --master=/dev/ttyACM0,57600 \
-  --out=udp:<VPN_IP>:14550
+  --out=udpin:0.0.0.0:14550
 ```
 
 ### 3️⃣ Автозапуск MAVProxy через systemd
 
 Создаём сервис:
 
-```bash
-sudo tee /etc/systemd/system/mavproxy.service > /dev/null <<'EOF'
+```bash                                                                      
 [Unit]
 Description=MAVProxy (venv /root/mik, USB /dev/ttyACM0)
 After=network-online.target
@@ -416,8 +414,8 @@ WorkingDirectory=/var/lib/mavproxy
 ExecStart=/root/mik/bin/python /root/mik/bin/mavproxy.py \
   --daemon \
   --master=/dev/ttyACM0 --baud=57600 \
-  --out=udpin:<VPN_IP>:14550 \
-  --out=tcpin:<VPN_IP>:7652 \
+  --out=udpin:0.0.0.0:14550 \
+  --out=tcpin:0.0.0.0:7652 \
   --aircraft /var/lib/mavproxy/MyAC
 
 Restart=on-failure
@@ -426,7 +424,7 @@ NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
-EOF
+
 ```
 
 Активируем и запускаем:
