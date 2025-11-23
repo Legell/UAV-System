@@ -268,3 +268,45 @@ body {
   font-size: 13px;
   color: #9ca3af;
 }
+.mission-item.current {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.4);
+}
+
+.mission-timeline {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+.mission-progress-outer {
+  margin-top: 6px;
+  width: 100%;
+  height: 6px;
+  background: rgba(15, 23, 42, 0.8);
+  border-radius: 9999px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.mission-progress-inner {
+  height: 100%;
+  width: 0%;
+  background: #38bdf8;
+  transition: width 0.2s ease;
+}
+
+.log-box {
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 10px;
+  padding: 6px 10px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.log-line {
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+
