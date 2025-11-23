@@ -41,6 +41,15 @@
           Курс: {{ uav.heading }}° |
           Скорость: {{ '%.1f'|format(uav.ground_speed) }} m/s
         </div>
+        <div class="uav-info small">
+          Режим: {{ uav.mode or '—' }} |
+          ARM: {{ 'ARMED' if uav.armed else 'DISARMED' }} |
+          GPS: {{ uav.gps_fix }}D / {{ uav.satellites or 0 }} sat
+        </div>
+        <div class="uav-info small">
+          Max H: {{ '%.1f'|format(uav.max_alt or 0) }} m |
+          Max V: {{ '%.1f'|format(uav.max_speed or 0) }} m/s
+        </div>
         <div class="uav-battery">
           {% set bp = uav.battery_percent %}
           {% if bp is not none and bp >= 0 %}
@@ -83,11 +92,15 @@
           Миссия пустая
         {% endif %}
       </div>
+      <div id="missionTimeline" class="small mission-timeline"></div>
       <div class="mission-actions">
         <button id="btnStartMission" class="btn btn-primary" disabled>Старт миссии</button>
         <button id="btnStopMission" class="btn btn-secondary" disabled>Стоп</button>
       </div>
       <div id="missionStatus" class="small mission-status"></div>
+      <div id="missionProgressOuter" class="mission-progress-outer">
+        <div id="missionProgressInner" class="mission-progress-inner"></div>
+      </div>
     </div>
 
     <div class="section">
@@ -95,6 +108,11 @@
       <input type="file" id="missionFile" accept=".plan,application/json">
       <button id="uploadBtn" class="btn btn-outline">Загрузить</button>
       <div id="uploadStatus" class="small"></div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Логи</div>
+      <div id="logBox" class="log-box small">Пока нет сообщений</div>
     </div>
   </div>
 
@@ -108,7 +126,30 @@
 
   const markers = {};
   let currentUavId = UAVS.length ? UAVS[0].id : null;
-  let missionPolyline = null;
+
+  // базовые точки маршрута (только waypoints из миссии)
+  let missionBasePoints = [];
+  // полилинии для пройденной/оставшейся части миссии
+  let missionPolylinePast = null;
+  let missionPolylineFuture = null;
+  // линия от текущего положения БВС к первой точке маршрута
+  let missionPolylineStart = null;
+  // маркер текущего waypoint
+  let missionCurrentMarker = null;
+  // круг вокруг выбранного БВС
+  let selectedUavCircle = null;
+
+  // снимок /uavs для работы с mission_status, logs и т.д.
+  let lastUavsSnapshot = UAVS.slice();
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;')
+      .replace(/'/g,'&#39;');
+  }
 
   function makeIcon(uav) {
     const offline = uav.status !== 'online';
@@ -117,7 +158,7 @@
 
     const uavNumber = uav.port - 219;
     const colors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
-    const bgColor = colors[(uavNumber - 1) % colors.length];
+    const bgColor = colors[(uavNumber - 1 + colors.length) % colors.length];
 
     return L.divIcon({
       className: 'uav-marker',
@@ -139,6 +180,15 @@
       iconSize: [48, 48],
       iconAnchor: [24, 24]
     });
+  }
+
+  function gpsLabel(uav) {
+    const fix = uav.gps_fix || 0;
+    const sats = (uav.satellites != null ? uav.satellites : '?');
+    let fixText = 'нет фикса';
+    if (fix === 2) fixText = '2D';
+    else if (fix >= 3) fixText = '3D';
+    return `${fixText} / ${sats} sat`;
   }
 
   function updateUAVsList(uavs) {
@@ -169,6 +219,12 @@
       }
       const width = bp !== null ? Math.max(5, Math.min(100, bp)) : 0;
 
+      const gpsText = gpsLabel(uav);
+      const mode = uav.mode || '—';
+      const armedText = uav.armed ? 'ARMED' : 'DISARMED';
+      const maxAlt = uav.max_alt != null ? uav.max_alt.toFixed(1) : '—';
+      const maxSpeed = uav.max_speed != null ? uav.max_speed.toFixed(1) : '—';
+
       uavItem.innerHTML = `
         <div class="uav-item-top">
           <span>${uav.name}</span>
@@ -183,6 +239,15 @@
           Высота: ${uav.alt.toFixed(1)} m |
           Курс: ${uav.heading}° |
           Скорость: ${uav.ground_speed.toFixed(1)} m/s
+        </div>
+        <div class="uav-info small">
+          Режим: ${mode} |
+          ARM: ${armedText} |
+          GPS: ${gpsText}
+        </div>
+        <div class="uav-info small">
+          Max H: ${maxAlt} m |
+          Max V: ${maxSpeed} m/s
         </div>
         <div class="uav-battery">
           ${
@@ -206,19 +271,186 @@
     });
   }
 
+  function updateLogBox(uav) {
+    const box = document.getElementById('logBox');
+    if (!box) return;
+    const logs = uav.logs || [];
+    if (!logs.length) {
+      box.textContent = 'Пока нет сообщений';
+      return;
+    }
+    box.innerHTML = logs.slice(-30).map(line =>
+      `<div class="log-line">• ${escapeHtml(line)}</div>`
+    ).join('');
+  }
+
+  function formatEta(seconds) {
+    if (!isFinite(seconds) || seconds <= 0) return '—';
+    const s = Math.round(seconds);
+    if (s < 60) return `${s} с`;
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    if (m < 60) {
+      return rem > 0 ? `${m} мин ${rem} с` : `${m} мин`;
+    }
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    return rm > 0 ? `${h} ч ${rm} мин` : `${h} ч`;
+  }
+
+  function haversine(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const toRad = x => x * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLon = toRad(lon2 - lon1);
+    const a =
+      Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+      Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+  }
+
+  function computeMissionEta(uav) {
+    if (!missionBasePoints || missionBasePoints.length === 0) return null;
+    const speed = uav.ground_speed || 0;
+    if (!speed || speed < 0.1) return null;
+
+    const eps = 1e-7;
+    if (Math.abs(uav.lat) < eps || Math.abs(uav.lon) < eps) return null;
+
+    let seq = (uav.mission_current_seq != null ? uav.mission_current_seq : 0);
+    let idx = seq - 1; // 0-й индекс миссии на борту — дом, у нас список без дома
+    if (idx < 0) idx = 0;
+    if (idx >= missionBasePoints.length) idx = missionBasePoints.length - 1;
+
+    const next = missionBasePoints[idx];
+    let distToNext = haversine(uav.lat, uav.lon, next[0], next[1]);
+
+    let remaining = distToNext;
+    for (let i = idx; i < missionBasePoints.length - 1; i++) {
+      const p1 = missionBasePoints[i];
+      const p2 = missionBasePoints[i+1];
+      remaining += haversine(p1[0], p1[1], p2[0], p2[1]);
+    }
+
+    return {
+      etaNextSec: distToNext / speed,
+      etaTotalSec: remaining / speed,
+    };
+  }
+
+  function updateMissionStatusUI(uav) {
+    const statusEl = document.getElementById('missionStatus');
+    const btnStart = document.getElementById('btnStartMission');
+    const btnStop  = document.getElementById('btnStopMission');
+    const progressBar = document.getElementById('missionProgressInner');
+
+    const mStatus = uav.mission_status || 'idle';
+    const total = uav.mission_total || 0;
+    const seq = (uav.mission_current_seq != null ? uav.mission_current_seq : -1);
+    const humanIndex = seq >= 0 ? seq + 1 : 0;
+
+    let text = '';
+    let perc = 0;
+
+    if (mStatus === 'idle') {
+      text = 'Миссия не выполняется';
+    } else if (mStatus === 'starting') {
+      text = 'Миссия загружается на борт...';
+    } else if (mStatus === 'running') {
+      if (total > 0) {
+        const clampedIdx = Math.min(humanIndex, total);
+        perc = (uav.mission_progress != null)
+          ? Math.round(uav.mission_progress * 100)
+          : Math.round((clampedIdx / total) * 100);
+        text = `Выполнение миссии: точка ${clampedIdx} из ${total} (${perc}%)`;
+      } else {
+        text = 'Выполнение миссии...';
+      }
+    } else if (mStatus === 'completed') {
+      perc = 100;
+      text = 'Миссия завершена';
+    } else if (mStatus === 'stopped') {
+      text = 'Миссия остановлена';
+    } else if (mStatus === 'error') {
+      const phase = uav.mission_phase || '';
+      text = 'Ошибка миссии' + (phase ? ` (${phase})` : '');
+    } else {
+      text = mStatus;
+    }
+
+    // ETA, если можем посчитать
+    if (mStatus === 'running' || mStatus === 'starting') {
+      const eta = computeMissionEta(uav);
+      if (eta) {
+        const etaNext = formatEta(eta.etaNextSec);
+        const etaTotal = formatEta(eta.etaTotalSec);
+        text += ` · До следующей точки: ${etaNext}, до конца миссии: ${etaTotal}`;
+      }
+    }
+
+    statusEl.textContent = text;
+
+    if (progressBar) {
+      const value = mStatus === 'completed' ? 100 : (perc || 0);
+      const clamped = Math.max(0, Math.min(100, value));
+      progressBar.style.width = clamped + '%';
+    }
+
+    const hasMission = Array.isArray(uav.mission) && uav.mission.length > 0;
+
+    btnStart.disabled =
+      !hasMission ||
+      uav.status !== 'online' ||
+      (mStatus === 'starting' || mStatus === 'running');
+
+    btnStop.disabled = !(mStatus === 'starting' || mStatus === 'running');
+
+    // подсветка текущего пункта миссии в списке
+    highlightCurrentMissionItem(uav);
+  }
+
+  let missionDomItems = []; // список DOM-элементов миссии в текущем боксе
+
+  function highlightCurrentMissionItem(uav) {
+    missionDomItems.forEach(el => el.classList.remove('current'));
+
+    const seq = (uav.mission_current_seq != null ? uav.mission_current_seq : -1);
+    const idx = seq - 1; // 0 — дом, 1..N — наши элементы
+    if (idx < 0 || idx >= missionDomItems.length) return;
+
+    const el = missionDomItems[idx];
+    if (el) el.classList.add('current');
+  }
+
+  function commandToLabel(cmd) {
+    switch (cmd) {
+      case 22: return 'Взлёт';
+      case 16: return 'WP';
+      case 20: return 'Посадка';
+      case 82: return 'RTL';
+      default: return `CMD ${cmd}`;
+    }
+  }
+
   async function handleUavClick(uav) {
     currentUavId = uav.id;
 
-    // Подсветка выбранного
     document.querySelectorAll('.uav-item').forEach(item => {
       item.classList.toggle('active', item.dataset.uavId === uav.id);
     });
 
-    // Центрируем карту
     map.setView([uav.lat, uav.lon], 16);
 
     await loadMission(uav.id);
     await loadWeather(uav.lat, uav.lon);
+
+    const current = lastUavsSnapshot.find(x => x.id === uav.id);
+    if (current) {
+      updateMissionStatusUI(current);
+      updateLogBox(current);
+    }
   }
 
   async function loadMission(uavId) {
@@ -226,55 +458,147 @@
       const res = await fetch(`/uavs/${uavId}/mission`);
       const data = await res.json();
       const box = document.getElementById('missionBox');
-      const btnStart = document.getElementById('btnStartMission');
-      const btnStop = document.getElementById('btnStopMission');
+      const timelineEl = document.getElementById('missionTimeline');
 
       box.innerHTML = '';
-      let points = [];
+      missionDomItems = [];
+      missionBasePoints = [];
 
       if (!data.items || data.items.length === 0) {
         box.innerHTML = 'Миссия пустая';
-        btnStart.disabled = true;
-        btnStop.disabled = true;
+        timelineEl.textContent = '';
       } else {
-        data.items.forEach(item => {
+        const parts = [];
+
+        data.items.forEach((item, index) => {
           const div = document.createElement('div');
           div.className = 'mission-item';
           div.innerHTML = `
-            <b>#${item.seq}</b> CMD ${item.command}
+            <b>#${item.seq}</b> ${commandToLabel(item.command)}
             <div class="small">${JSON.stringify(item.params)}</div>
           `;
           box.appendChild(div);
+          missionDomItems.push(div);
 
           if (item.lat != null && item.lon != null) {
-            points.push([item.lat, item.lon]);
+            missionBasePoints.push([item.lat, item.lon]);
           }
+
+          parts.push(`#${item.seq} ${commandToLabel(item.command)}`);
         });
 
-        btnStart.disabled = false;
-        btnStop.disabled = false;
+        timelineEl.textContent = 'Маршрут: ' + parts.join(' → ');
       }
 
-      drawMissionPolyline(points);
+      // путь для карты: дрон → первая точка → ...
+      const eps = 1e-7;
+      let droneLat = null;
+      let droneLon = null;
+
+      const uav = lastUavsSnapshot.find(u => u.id === uavId);
+      if (uav && Math.abs(uav.lat) > eps && Math.abs(uav.lon) > eps) {
+        droneLat = uav.lat;
+        droneLon = uav.lon;
+      }
+
+      drawMissionSegments(droneLat, droneLon);
+
     } catch (error) {
       console.error('Ошибка загрузки миссии:', error);
     }
   }
 
-  function drawMissionPolyline(points) {
-    if (missionPolyline) {
-      map.removeLayer(missionPolyline);
-      missionPolyline = null;
+  function clearMissionLayers() {
+    if (missionPolylinePast) {
+      map.removeLayer(missionPolylinePast);
+      missionPolylinePast = null;
     }
-    if (!points || !points.length) return;
+    if (missionPolylineFuture) {
+      map.removeLayer(missionPolylineFuture);
+      missionPolylineFuture = null;
+    }
+    if (missionPolylineStart) {
+      map.removeLayer(missionPolylineStart);
+      missionPolylineStart = null;
+    }
+    if (missionCurrentMarker) {
+      map.removeLayer(missionCurrentMarker);
+      missionCurrentMarker = null;
+    }
+  }
 
-    missionPolyline = L.polyline(points, {
-      color: '#38bdf8',
-      weight: 3,
-      dashArray: '4'
-    }).addTo(map);
+  function drawMissionSegments(droneLat, droneLon) {
+    clearMissionLayers();
 
-    map.fitBounds(missionPolyline.getBounds().pad(0.2));
+    if (!missionBasePoints || missionBasePoints.length === 0) return;
+
+    const latlngs = [];
+    const eps = 1e-7;
+
+    // линия от дрона до первой точки маршрута
+    if (droneLat != null && droneLon != null) {
+      const first = missionBasePoints[0];
+      missionPolylineStart = L.polyline([[droneLat, droneLon], first], {
+        color: '#64748b',
+        weight: 2,
+        dashArray: '4',
+      }).addTo(map);
+      latlngs.push([droneLat, droneLon]);
+    }
+
+    missionBasePoints.forEach(p => latlngs.push(p));
+
+    // делим маршрут на пройденный/оставшийся по mission_current_seq
+    const current = lastUavsSnapshot.find(u => u.id === currentUavId);
+    let idx = -1;
+    if (current && typeof current.mission_current_seq === 'number') {
+      idx = current.mission_current_seq - 1; // 0 — дом
+    }
+    if (idx < -1) idx = -1;
+    if (idx >= missionBasePoints.length) idx = missionBasePoints.length - 1;
+
+    const pastPoints = [];
+    const futurePoints = [];
+
+    if (idx < 0) {
+      // ничего не пройдено
+      futurePoints.push(...missionBasePoints);
+    } else {
+      for (let i = 0; i < missionBasePoints.length; i++) {
+        if (i <= idx) pastPoints.push(missionBasePoints[i]);
+        if (i >= idx) futurePoints.push(missionBasePoints[i]);
+      }
+    }
+
+    if (pastPoints.length >= 2) {
+      missionPolylinePast = L.polyline(pastPoints, {
+        color: '#38bdf8',
+        weight: 3,
+      }).addTo(map);
+    }
+    if (futurePoints.length >= 2) {
+      missionPolylineFuture = L.polyline(futurePoints, {
+        color: '#64748b',
+        weight: 3,
+        dashArray: '4',
+      }).addTo(map);
+    }
+
+    // маркер текущего WP
+    if (idx >= 0 && idx < missionBasePoints.length) {
+      const p = missionBasePoints[idx];
+      missionCurrentMarker = L.circleMarker(p, {
+        radius: 6,
+        color: '#f97316',
+        fillColor: '#f97316',
+        fillOpacity: 0.9,
+        weight: 2,
+      }).addTo(map);
+    }
+
+    if (latlngs.length) {
+      map.fitBounds(L.latLngBounds(latlngs).pad(0.2));
+    }
   }
 
   async function loadWeather(lat, lon) {
@@ -312,6 +636,12 @@
     const bp = (uav.battery_percent != null && uav.battery_percent >= 0)
       ? `${uav.battery_percent}%`
       : 'нет данных';
+    const gpsText = gpsLabel(uav);
+    const mode = uav.mode || '—';
+    const armedText = uav.armed ? 'ARMED' : 'DISARMED';
+    const maxAlt = uav.max_alt != null ? uav.max_alt.toFixed(1) : '—';
+    const maxSpeed = uav.max_speed != null ? uav.max_speed.toFixed(1) : '—';
+
     return `
       <b>${uav.name}</b><br>
       Статус: ${uav.status}<br>
@@ -320,6 +650,9 @@
       Высота: ${uav.alt.toFixed(1)} m<br>
       Курс: ${uav.heading}°<br>
       Скорость: ${uav.ground_speed.toFixed(1)} m/s<br>
+      Режим: ${mode} (${armedText})<br>
+      GPS: ${gpsText}<br>
+      Max H: ${maxAlt} m, Max V: ${maxSpeed} m/s<br>
       Батарея: ${bp}
     `;
   }
@@ -328,6 +661,8 @@
     try {
       const response = await fetch('/uavs');
       const uavs = await response.json();
+
+      lastUavsSnapshot = uavs.slice();
 
       updateUAVsList(uavs);
 
@@ -346,6 +681,29 @@
       const currentUav = currentUavId && uavs.find(u => u.id === currentUavId);
       if (currentUav) {
         await loadWeather(currentUav.lat, currentUav.lon);
+        updateMissionStatusUI(currentUav);
+        updateLogBox(currentUav);
+
+        // круг вокруг выбранного БВС
+        if (!selectedUavCircle) {
+          selectedUavCircle = L.circle([currentUav.lat, currentUav.lon], {
+            radius: 25,
+            color: '#38bdf8',
+            weight: 1,
+            fillColor: '#38bdf8',
+            fillOpacity: 0.1,
+          }).addTo(map);
+        } else {
+          selectedUavCircle.setLatLng([currentUav.lat, currentUav.lon]);
+        }
+
+        // обновим визуализацию маршрута относительно новой позиции БВС
+        drawMissionSegments(currentUav.lat, currentUav.lon);
+      } else {
+        if (selectedUavCircle) {
+          map.removeLayer(selectedUavCircle);
+          selectedUavCircle = null;
+        }
       }
 
       const currentIds = uavs.map(u => u.id);
@@ -413,9 +771,6 @@
 
       statusEl.innerText = 'Миссия загружена';
       await loadMission(currentUavId);
-      if (data.waypoints && data.waypoints.length) {
-        drawMissionPolyline(data.waypoints);
-      }
     } catch (e) {
       console.error(e);
       statusEl.innerText = 'Ошибка сети при загрузке';
@@ -425,6 +780,11 @@
   document.getElementById('btnStartMission').addEventListener('click', async () => {
     if (!currentUavId) return;
     const statusEl = document.getElementById('missionStatus');
+
+    if (!confirm('Запустить миссию на выбранном БВС?')) {
+      return;
+    }
+
     statusEl.innerText = 'Отправка миссии на борт...';
 
     try {
@@ -436,7 +796,7 @@
         statusEl.innerText = 'Ошибка: ' + (data.error || res.statusText);
         return;
       }
-      statusEl.innerText = 'Миссия запущена';
+      statusEl.innerText = 'Миссия запускается...';
     } catch (e) {
       console.error(e);
       statusEl.innerText = 'Ошибка сети при запуске миссии';
@@ -446,6 +806,11 @@
   document.getElementById('btnStopMission').addEventListener('click', async () => {
     if (!currentUavId) return;
     const statusEl = document.getElementById('missionStatus');
+
+    if (!confirm('Остановить текущую миссию? БВС останется в режиме ожидания.')) {
+      return;
+    }
+
     statusEl.innerText = 'Остановка миссии...';
 
     try {
@@ -467,9 +832,12 @@
   function initialize() {
     initializeMarkers(UAVS);
     updateUAVsList(UAVS);
+    lastUavsSnapshot = UAVS.slice();
 
     if (UAVS.length > 0) {
       handleUavClick(UAVS[0]);
+      updateMissionStatusUI(UAVS[0]);
+      updateLogBox(UAVS[0]);
     }
 
     setInterval(updateUAVsData, 2000);
